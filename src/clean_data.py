@@ -104,6 +104,82 @@ def save_cleaned_data(df: pd.DataFrame, output_path: Path | str) -> None:
     df.to_csv(output_path, index=False)
 
 
+def plot_overall_survival(df: pd.DataFrame) -> None:
+    """Plot overall survival proportion and passenger counts."""
+    pass
+
+
+def plot_gender_survival(df: pd.DataFrame) -> None:
+    """Plot passenger count and survival rate by gender."""
+    pass
+
+
+def plot_class_survival(df: pd.DataFrame) -> None:
+    """Plot passenger count and survival rate by ticket class (Pclass)."""
+    pass
+
+
+def plot_age_distribution(df: pd.DataFrame) -> None:
+    """Plot age histogram/KDE and survival rates by age demographic groups."""
+    pass
+
+
+def plot_fare_distribution(df: pd.DataFrame) -> None:
+    """Plot fare distribution boxplot and survival rates across quartiles."""
+    pass
+
+
+def plot_multivariate_class_sex(df: pd.DataFrame) -> None:
+    """Plot compound interaction between ticket class and gender on survival."""
+    pass
+
+
+def plot_correlation_heatmap(df: pd.DataFrame) -> None:
+    """Plot Pearson correlation heatmap for all numerical features."""
+    pass
+
+
+def print_menu() -> None:
+    """Display available visualization options."""
+    print("Titanic EDA Visualizer")
+    print("1) Overall Survival")
+    print("2) Gender Survival")
+    print("3) Class Survival")
+    print("4) Age Distribution")
+    print("5) Fare Distribution")
+    print("6) Multivariate (Class & Sex)")
+    print("7) Correlation Heatmap")
+    print("0) Exit")
+
+
+def visualization_menu(df_clean: pd.DataFrame) -> None:
+    """Manage user interaction loop for exploring visualizations."""
+    while True:
+        print_menu()
+        user_choice = input("Enter your choice (0-7): ").strip()
+
+        match user_choice:
+            case "0":
+                print("\nExiting visualizer. Goodbye!")
+                break
+            case "1":
+                plot_overall_survival(df_clean)
+            case "2":
+                plot_gender_survival(df_clean)
+            case "3":
+                plot_class_survival(df_clean)
+            case "4":
+                plot_age_distribution(df_clean)
+            case "5":
+                plot_fare_distribution(df_clean)
+            case "6":
+                plot_multivariate_class_sex(df_clean)
+            case "7":
+                plot_correlation_heatmap(df_clean)
+            case _:
+                print("\n[!] Invalid input! Please enter a number between 0 and 7.")
+
+
 def main() -> None:
     """Application entry point."""
     filename = get_input_filename()
@@ -114,11 +190,9 @@ def main() -> None:
 
     output_filepath = BASE_DIR / "data" / f"cleaned_{filename}"
     save_cleaned_data(cleaned_df, output_filepath)
+    print(f"\n[+] Dataset successfully cleaned and saved to: {output_filepath}")
 
-    print(f"Dataset successfully cleaned and saved to: {output_filepath}")
-    print(f"Cleaned shape: {cleaned_df.shape}")
-    print("Null count per column:")
-    print(cleaned_df.isnull().sum())
+    visualization_menu(cleaned_df)
 
 
 if __name__ == "__main__":
