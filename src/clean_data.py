@@ -1,22 +1,42 @@
 import argparse
 from pathlib import Path
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import seaborn as sns
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+REQUIRED_COLUMNS = {
+    "PassengerId", "Survived", "Pclass", "Name", "Sex", "Age",
+    "SibSp", "Parch", "Ticket", "Fare", "Cabin", "Embarked",
+}
+
+SURVIVAL_COLORS = ["#e74c3c", "#2ecc71"]  # perished, survived
+SURVIVAL_LABELS = ["Perished (0)", "Survived (1)"]
+CLASS_ORDER = [1, 2, 3]
+CLASS_LABELS = ["1st Class", "2nd Class", "3rd Class"]
+SEX_ORDER = ["female", "male"]
+SEX_COLORS = {"female": "#e84393", "male": "#0984e3"}
+AGE_BINS = [0, 12, 18, 35, 60, 100]
+AGE_LABELS = [
+    "Child (0-12)",
+    "Teen (13-18)",
+    "Young Adult (19-35)",
+    "Adult (36-60)",
+    "Elderly (60+)",
+]
+
 
 # 1. File I/O & Argument Parsing
 
-def get_input_filename() -> str:
+def get_input_filename(args_list: list[str] | None = None) -> str:
     """Parse CLI arguments and return the target dataset filename."""
     parser = argparse.ArgumentParser(
         description="CLI tool for cleaning and visualizing the Titanic dataset."
     )
-
     parser.add_argument(
         "-f",
         "--file",
@@ -24,8 +44,7 @@ def get_input_filename() -> str:
         default="train.csv",
         help="Messy dataset filename inside the 'data/' directory (default: train.csv).",
     )
-
-    args = parser.parse_args()
+    args = parser.parse_args(args_list)
     return args.file
 
 
@@ -38,11 +57,13 @@ def load_data(filepath: Path | str) -> pd.DataFrame:
 
     suffix = filepath.suffix.lower()
     if suffix != ".csv":
-        raise ValueError(
-            f"Format '{suffix}' is not supported. Allowed format: .csv"
-        )
+        raise ValueError(f"Format '{suffix}' is not supported. Allowed format: .csv")
 
-    df = pd.read_csv(filepath)
+    try:
+        df = pd.read_csv(filepath)
+    except pd.errors.EmptyDataError:
+        raise ValueError(f"The file at '{filepath}' is empty!")
+
     if df.empty:
         raise ValueError(f"The file at '{filepath}' is empty!")
 
@@ -60,12 +81,7 @@ def save_cleaned_data(df: pd.DataFrame, output_path: Path | str) -> None:
 
 def validate_columns(df: pd.DataFrame) -> None:
     """Validate that the DataFrame contains all required Titanic columns."""
-    required_columns = {
-        "PassengerId", "Survived", "Pclass", "Name",
-        "Sex", "Age", "SibSp", "Parch", "Ticket",
-        "Fare", "Cabin", "Embarked",
-    }
-    missing_columns = required_columns - set(df.columns)
+    missing_columns = REQUIRED_COLUMNS - set(df.columns)
     if missing_columns:
         raise ValueError(
             f"Selected dataframe is missing required columns: {sorted(missing_columns)}"
@@ -73,33 +89,58 @@ def validate_columns(df: pd.DataFrame) -> None:
 
 
 def impute_embarked(df: pd.DataFrame) -> pd.DataFrame:
-    """Impute missing values in Embarked column using the most frequent port (mode)."""
+    """Impute missing Embarked values with the most frequent port (mode).
+
+    If every value is missing there is no mode, so the column is returned unchanged.
+    """
     df = df.copy()
     embarked_mode = df["Embarked"].mode()
     if not embarked_mode.empty:
-        df["Embarked"] = df["Embarked"].fillna(embarked_mode[0])
+        df["Embarked"] = df["Embarked"].fillna(embarked_mode.iloc[0])
     return df
 
 
 def impute_age(df: pd.DataFrame) -> pd.DataFrame:
-    """Impute missing values in Age using group-specific medians based on Pclass and Sex."""
+    """Impute missing Age values with the median of their (Pclass, Sex) group.
+
+    Groups with no known ages fall back to the overall median of the
+    originally known ages. The fallback is computed before any imputation,
+    so imputed values never influence it.
+    """
     df = df.copy()
-    age_medians = df.groupby(["Pclass", "Sex"])["Age"].transform("median")
-    df["Age"] = df["Age"].fillna(age_medians)
+    overall_median = df["Age"].median()
+    group_medians = df.groupby(["Pclass", "Sex"])["Age"].transform("median")
+    df["Age"] = df["Age"].fillna(group_medians).fillna(overall_median)
     return df
 
 
 def engineer_cabin_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Extract Has_Cabin (binary) and Deck level from Cabin, then drop the raw column."""
+    """Derive Has_Cabin (binary) and Deck (first letter of Cabin), then drop Cabin.
+
+    Works even when the Cabin column is entirely missing.
+    """
     df = df.copy()
     df["Has_Cabin"] = df["Cabin"].notnull().astype(int)
-    df["Deck"] = df["Cabin"].str[0].fillna("Unknown")
+    decks = df["Cabin"].dropna().astype(str).str[0]
+    df["Deck"] = decks.reindex(df.index).fillna("Unknown")
     df = df.drop(columns=["Cabin"])
     return df
 
 
+def assign_age_group(ages: pd.Series) -> pd.Series:
+    """Bin ages into demographic groups. Infants (age < 1) fall into the Child group."""
+    return pd.cut(ages, bins=AGE_BINS, labels=AGE_LABELS, include_lowest=True)
+
+
+def assign_fare_quartile(fares: pd.Series) -> pd.Series:
+    """Bin fares into quartiles, labelled with their actual boundaries."""
+    _, edges = pd.qcut(fares, q=4, retbins=True, duplicates="drop")
+    labels = [f"£{low:.2f}–£{high:.2f}" for low, high in zip(edges[:-1], edges[1:])]
+    return pd.cut(fares, bins=edges, labels=labels, include_lowest=True)
+
+
 def cleaner(df: pd.DataFrame) -> pd.DataFrame:
-    """Orchestrate validation, deduplication, and all data imputation procedures."""
+    """Run validation, deduplication, imputation and feature engineering."""
     validate_columns(df)
 
     df_clean = df.copy()
@@ -115,24 +156,23 @@ def cleaner(df: pd.DataFrame) -> pd.DataFrame:
 
 def plot_overall_survival(df: pd.DataFrame) -> None:
     """Plot overall survival proportion (pie chart) and passenger counts (bar chart)."""
-    survived_counts = df["Survived"].value_counts()
-    colors = ["#e74c3c", "#2ecc71"]
+    survived_counts = df["Survived"].value_counts().reindex([0, 1], fill_value=0)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    # Pie Chart
     axes[0].pie(
-        survived_counts,
-        labels=["Perished (0)", "Survived (1)"],
+        survived_counts.values,
+        labels=SURVIVAL_LABELS,
         autopct="%1.1f%%",
         startangle=90,
-        colors=colors,
+        colors=SURVIVAL_COLORS,
         explode=[0, 0.05],
     )
     axes[0].set_title("Overall Survival Proportion", fontsize=12, fontweight="bold")
 
-    # Bar Plot
-    bars = axes[1].bar(["Perished", "Survived"], survived_counts.values, color=colors)
+    bars = axes[1].bar(
+        ["Perished", "Survived"], survived_counts.values, color=SURVIVAL_COLORS
+    )
     axes[1].set_title("Passenger Count by Survival Status", fontsize=12, fontweight="bold")
     axes[1].set_ylabel("Number of Passengers")
     axes[1].set_xlabel("Survival Status")
@@ -145,27 +185,26 @@ def plot_overall_survival(df: pd.DataFrame) -> None:
 
 def plot_gender_survival(df: pd.DataFrame) -> None:
     """Plot passenger count and survival percentage categorized by gender."""
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    _, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    # Passenger Count by Gender and Survival Status
     sns.countplot(
         data=df,
         x="Sex",
+        order=SEX_ORDER,
         hue="Survived",
-        palette=["#e74c3c", "#2ecc71"],
+        palette=SURVIVAL_COLORS,
         ax=axes[0],
     )
     axes[0].set_title("Passenger Count by Sex and Survival Status", fontsize=12, fontweight="bold")
     axes[0].set_xlabel("Sex")
     axes[0].set_ylabel("Passenger Count")
-    axes[0].legend(title="Status", labels=["Perished (0)", "Survived (1)"])
+    axes[0].legend(title="Status", labels=SURVIVAL_LABELS)
 
-    # Survival Rate by Gender (%)
-    gender_survival_rate = df.groupby("Sex")["Survived"].mean() * 100
+    gender_rates = df.groupby("Sex")["Survived"].mean().reindex(SEX_ORDER) * 100
     bars = axes[1].bar(
-        gender_survival_rate.index,
-        gender_survival_rate.values,
-        color=["#e84393", "#0984e3"],
+        SEX_ORDER,
+        gender_rates.values,
+        color=[SEX_COLORS[sex] for sex in SEX_ORDER],
         width=0.45,
     )
     axes[1].set_title("Survival Rate by Sex (%)", fontsize=12, fontweight="bold")
@@ -181,31 +220,27 @@ def plot_gender_survival(df: pd.DataFrame) -> None:
 
 def plot_class_survival(df: pd.DataFrame) -> None:
     """Plot passenger count and survival percentage across ticket classes (Pclass)."""
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    _, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    # Passenger Count by Pclass and Survival Status
     sns.countplot(
         data=df,
         x="Pclass",
+        order=CLASS_ORDER,
         hue="Survived",
-        palette=["#e74c3c", "#2ecc71"],
+        palette=SURVIVAL_COLORS,
         ax=axes[0],
     )
     axes[0].set_title("Passenger Count by Class and Survival Status", fontsize=12, fontweight="bold")
     axes[0].set_xlabel("Ticket Class (Pclass)")
     axes[0].set_ylabel("Number of Passengers")
-    axes[0].set_xticks([0, 1, 2], labels=["1st Class", "2nd Class", "3rd Class"])
-    axes[0].legend(title="Status", labels=["Perished (0)", "Survived (1)"])
+    axes[0].set_xticks(range(len(CLASS_ORDER)), labels=CLASS_LABELS)
+    axes[0].legend(title="Status", labels=SURVIVAL_LABELS)
 
-    # Survival Rate by Ticket Class (%)
-    pclass_survival_rate = df.groupby("Pclass")["Survived"].mean() * 100
-    class_labels = ["1st Class", "2nd Class", "3rd Class"]
-    class_colors = ["#f1c40f", "#3498db", "#95a5a6"]
-
+    class_rates = df.groupby("Pclass")["Survived"].mean().reindex(CLASS_ORDER) * 100
     bars = axes[1].bar(
-        class_labels,
-        pclass_survival_rate.values,
-        color=class_colors,
+        CLASS_LABELS,
+        class_rates.values,
+        color=["#f1c40f", "#3498db", "#95a5a6"],
         width=0.45,
     )
     axes[1].set_title("Survival Rate by Ticket Class (%)", fontsize=12, fontweight="bold")
@@ -221,16 +256,15 @@ def plot_class_survival(df: pd.DataFrame) -> None:
 
 def plot_age_distribution(df: pd.DataFrame) -> None:
     """Plot age histogram/KDE and survival percentages by demographic age groups."""
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    _, axes = plt.subplots(1, 2, figsize=(13, 5))
 
-    # Continuous Distribution (Histogram + KDE)
     sns.histplot(
         data=df,
         x="Age",
         hue="Survived",
         kde=True,
         bins=25,
-        palette=["#e74c3c", "#2ecc71"],
+        palette=SURVIVAL_COLORS,
         alpha=0.4,
         ax=axes[0],
     )
@@ -241,14 +275,11 @@ def plot_age_distribution(df: pd.DataFrame) -> None:
     legend = axes[0].get_legend()
     if legend:
         legend.set_title("Status")
-        for text, label in zip(legend.get_texts(), ["Perished (0)", "Survived (1)"]):
+        for text, label in zip(legend.get_texts(), SURVIVAL_LABELS):
             text.set_text(label)
 
-    # Survival Rate by Demographic Age Group
-    age_bins = [0, 12, 18, 35, 60, 100]
-    age_labels = ["Child (0-12)", "Teen (13-18)", "Young Adult (19-35)", "Adult (36-60)", "Elderly (60+)"]
-    temp_age_groups = pd.cut(df["Age"], bins=age_bins, labels=age_labels)
-    age_survival = df.groupby(temp_age_groups, observed=False)["Survived"].mean() * 100
+    age_groups = assign_age_group(df["Age"])
+    age_survival = df.groupby(age_groups, observed=False)["Survived"].mean().mul(100)
 
     bars = axes[1].bar(
         range(len(age_survival)),
@@ -260,7 +291,7 @@ def plot_age_distribution(df: pd.DataFrame) -> None:
     axes[1].set_ylabel("Survival Percentage (%)")
     axes[1].set_xlabel("Age Group")
     axes[1].set_ylim(0, 100)
-    axes[1].set_xticks(range(len(age_survival)), labels=age_labels, rotation=15)
+    axes[1].set_xticks(range(len(age_survival)), labels=AGE_LABELS, rotation=15)
     axes[1].bar_label(bars, fmt="%.1f%%", padding=3, fontweight="bold")
 
     plt.tight_layout()
@@ -270,15 +301,14 @@ def plot_age_distribution(df: pd.DataFrame) -> None:
 
 def plot_fare_distribution(df: pd.DataFrame) -> None:
     """Plot fare boxplot and survival rates across balanced quartiles."""
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    _, axes = plt.subplots(1, 2, figsize=(13, 5))
 
-    # Boxplot of Raw Fare by Survival Status
     sns.boxplot(
         data=df,
         x="Survived",
         y="Fare",
         hue="Survived",
-        palette=["#e74c3c", "#2ecc71"],
+        palette=SURVIVAL_COLORS,
         ax=axes[0],
         showmeans=True,
         meanprops={"marker": "o", "markerfacecolor": "white", "markeredgecolor": "black"},
@@ -286,15 +316,13 @@ def plot_fare_distribution(df: pd.DataFrame) -> None:
     axes[0].set_title("Fare Distribution by Survival Status (Raw Data)", fontsize=12, fontweight="bold")
     axes[0].set_xlabel("Survival Status")
     axes[0].set_ylabel("Fare (£)")
-    axes[0].set_xticks([0, 1], labels=["Perished (0)", "Survived (1)"])
-
+    axes[0].set_xticks([0, 1], labels=SURVIVAL_LABELS)
     if axes[0].get_legend():
         axes[0].get_legend().remove()
 
-    # Survival Rate across Fare Quartiles
-    fare_labels = ["Low (£0-£7.9)", "Mid-Low (£7.9-£14.5)", "Mid-High (£14.5-£31.0)", "High (£31.0+)"]
-    temp_fare_bins = pd.qcut(df["Fare"], q=4, labels=fare_labels)
-    fare_survival = df.groupby(temp_fare_bins, observed=False)["Survived"].mean() * 100
+    fare_quartiles = assign_fare_quartile(df["Fare"])
+    fare_survival = df.groupby(fare_quartiles, observed=False)["Survived"].mean().mul(100)
+    fare_labels = [str(label) for label in fare_survival.index]
 
     bars = axes[1].bar(
         range(len(fare_survival)),
@@ -316,44 +344,46 @@ def plot_fare_distribution(df: pd.DataFrame) -> None:
 
 def plot_multivariate_class_sex(df: pd.DataFrame) -> None:
     """Plot compound interaction between ticket class and gender on survival rates."""
-    pivot_survival = df.pivot_table(index="Pclass", columns="Sex", values="Survived", aggfunc="mean") * 100
-    x_indices = np.arange(len(pivot_survival.index))
+    pivot_survival = (
+        df.pivot_table(index="Pclass", columns="Sex", values="Survived", aggfunc="mean")
+        .reindex(index=CLASS_ORDER, columns=SEX_ORDER)
+        * 100
+    )
+    x_indices = np.arange(len(CLASS_ORDER))
     bar_width = 0.35
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    _, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    # Clustered Bar Chart
     bars_female = axes[0].bar(
         x_indices - bar_width / 2,
-        pivot_survival["female"],
+        pivot_survival["female"].values,
         bar_width,
         label="Female",
-        color="#e84393",
+        color=SEX_COLORS["female"],
     )
     bars_male = axes[0].bar(
         x_indices + bar_width / 2,
-        pivot_survival["male"],
+        pivot_survival["male"].values,
         bar_width,
         label="Male",
-        color="#0984e3",
+        color=SEX_COLORS["male"],
     )
     axes[0].set_title("Survival Rate by Class and Gender (%)", fontsize=12, fontweight="bold")
     axes[0].set_ylabel("Survival Percentage (%)")
     axes[0].set_xlabel("Ticket Class")
     axes[0].set_ylim(0, 110)
-    axes[0].set_xticks(x_indices, labels=["1st Class", "2nd Class", "3rd Class"])
+    axes[0].set_xticks(x_indices, labels=CLASS_LABELS)
     axes[0].legend(title="Gender")
     axes[0].bar_label(bars_female, fmt="%.1f%%", padding=3, fontweight="bold")
     axes[0].bar_label(bars_male, fmt="%.1f%%", padding=3, fontweight="bold")
 
-    # Heatmap Matrix
     sns.heatmap(
         pivot_survival,
         annot=True,
         fmt=".1f",
         cmap="YlGnBu",
         cbar_kws={"label": "Survival Rate (%)"},
-        yticklabels=["1st Class", "2nd Class", "3rd Class"],
+        yticklabels=CLASS_LABELS,
         ax=axes[1],
     )
     axes[1].set_title("Survival Rate Heatmap (Pclass vs Sex)", fontsize=12, fontweight="bold")
@@ -367,11 +397,14 @@ def plot_multivariate_class_sex(df: pd.DataFrame) -> None:
 
 def plot_correlation_heatmap(df: pd.DataFrame) -> None:
     """Plot upper-triangular Pearson correlation heatmap for all numerical features."""
-    numerical_cols = [col for col in df.select_dtypes(include=[np.number]).columns if col != "PassengerId"]
+    numerical_cols = [
+        col for col in df.select_dtypes(include=[np.number]).columns
+        if col != "PassengerId"
+    ]
     corr_matrix = df[numerical_cols].corr()
 
     fig, ax = plt.subplots(figsize=(9, 7))
-    upper_mask = np.triu(np.ones_like(corr_matrix, dtype=bool))
+    upper_mask = np.triu(np.ones(corr_matrix.shape, dtype=bool))
 
     sns.heatmap(
         corr_matrix,
